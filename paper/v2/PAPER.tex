@@ -1,0 +1,807 @@
+\documentclass{article}
+
+% Workshop track (double-blind) — most appropriate for a reference
+% architecture and validation harness without trained-model results.
+\usepackage[dblblindworkshop]{neurips_2026}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{array}
+\usepackage{multirow}
+
+\title{A Reference Architecture and Validation Harness for Multimodal Emotion Recognition in Mental Health Diagnostics}
+
+\author{%
+  Anonymous Author(s) \\
+  Affiliation(s) \\
+  \texttt{email(s)} \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Multimodal emotion recognition (MER) offers a promising avenue for early detection and
+monitoring of mental health conditions by analysing speech prosody, facial expressions,
+and textual content from clinical interviews. Despite advances in unimodal encoders and
+multimodal fusion, existing MER systems have not been validated for clinical deployment:
+they lack robustness to clinically-correlated modality dropout, ignore the session-level
+temporal structure of therapeutic interviews, and provide no interpretability grounded in
+diagnostic constructs such as the Patient Health Questionnaire (PHQ-8). We present a
+reference architecture---the Cross-Modal Gated Exchange Fusion network with Session-Level
+Hierarchical Transformer and Clinical Concept Bottleneck (CM-GEF + SLHT + CCB)---together
+with a comprehensive validation harness. The architecture introduces per-dimension gated
+feature substitution informed by learned modality quality estimates, therapeutic phase
+embeddings that contextualise utterances within a 4-phase interview structure, and a
+concept bottleneck that maps session representations through DSM-5-aligned clinical
+constructs. The harness comprises 35+ unit tests covering shape correctness, gradient flow,
+and bf16 numerical stability; seven synthetic benchmarks for missing-modality stress,
+clinical dropout patterns, and sustained affect detection; and ten single-field ablations
+that isolate each architectural decision. We release the typed \texttt{ModelConfig}
+contract, PyTorch reference implementation, and validation suite as an open-source
+starting point for follow-up work on clinical MER. Trained-model evaluation on real
+clinical datasets is explicitly left as future work.
+\end{abstract}
+
+
+\section{Introduction}
+
+Mental health disorders affect an estimated one in eight people worldwide, with depression
+alone contributing to over 50 million years lived with disability globally~\cite{who2023depression}.
+Early detection and continuous monitoring of emotional states can substantially improve
+therapeutic outcomes, yet many cases remain undiagnosed until they reach critical
+stages. Multimodal emotion recognition (MER) addresses this gap by integrating cues from
+speech, facial expressions, and language, offering a richer assessment of a patient's
+emotional state than any single modality alone~\cite{survey2026multimodal}.
+
+Recent years have seen significant progress in both unimodal emotion encoders and
+multimodal fusion architectures. Self-supervised speech models such as WavLM~\cite{chen2022wavlm}
+and HuBERT~\cite{hsu2021hubert} provide robust paralinguistic representations; vision
+transformers like DINOv2~\cite{oquab2023dinov2} deliver strong facial affect features;
+and domain-adapted language models such as MentalBERT~\cite{ji2022mentalbert} capture
+clinical vocabulary. On the fusion side, cross-modal Transformers~\cite{tsai2019mult},
+hierarchical gated networks~\cite{aefnet2025}, and graph-based approaches~\cite{micga2025}
+have pushed benchmark accuracy on lab datasets to above 99\%~\cite{unifiedmer2025}.
+
+Despite these advances, three critical gaps prevent existing MER systems from being
+deployed in clinical mental health settings. \textbf{First}, missing-modality robustness
+has only been evaluated under random dropout conditions on clean lab benchmarks
+(CMU-MOSI, IEMOCAP)~\cite{amte2025,micga2025}. In clinical interviews, modality dropout
+is systematically correlated with emotional state---patients turn away during distress
+(vision lost), cry (speech unintelligible), or fall silent (text absent)---yet no
+existing work validates gated fusion under such clinically-correlated patterns.
+\textbf{Second}, the temporal structure of a 30--60 minute therapeutic interview---with
+distinct phases of rapport-building, exploration, intervention, and closure---is ignored;
+current models process short clips or windowed utterances~\cite{dsin2025,dstc2025}.
+\textbf{Third}, model predictions are not interpretable in clinically actionable terms;
+generated explanations~\cite{ecmc2026} are not grounded in standardised diagnostic
+constructs such as the PHQ-8~\cite{kroenke2009phq}.
+
+This paper presents a \textbf{reference architecture and validation harness} designed
+to address these gaps. We do not claim to outperform existing systems on clinical
+data---no model training on real clinical datasets has been conducted. Instead, our
+contribution is the architecture itself, the design rationale substantiated by
+inductive-bias arguments, and a reproducible validation infrastructure that enables
+the community to iterate on clinical MER designs.
+
+In summary, our contributions are:
+\begin{itemize}
+  \item We present a reference architecture for clinical MER that combines
+        \textbf{Cross-Modal Gated Exchange Fusion} (CM-GEF) with learned per-utterance
+        modality quality estimates, a \textbf{Session-Level Hierarchical Transformer}
+        (SLHT) with therapeutic phase embeddings, and a \textbf{Clinical Concept
+        Bottleneck} (CCB) aligned to PHQ-8 depression criteria.
+  \item We provide a typed \texttt{ModelConfig} dataclass that encodes all 60+
+        hyperparameters with defaults and docstring rationale, enabling systematic
+        exploration of the design space.
+  \item We release a validation harness covering shape correctness (35+ pytest tests),
+        gradient flow verification, bf16 numerical stability, seven synthetic benchmarks
+        (missing modality stress, clinical dropout patterns, late fusion comparison,
+        quality estimator sensitivity, sustained affect proxy, concept mapping fidelity,
+        throughput profiling), and ten single-field ablations.
+  \item We open-source the full PyTorch reference implementation under a permissive
+        license to support reproducible follow-up work.
+\end{itemize}
+
+The remainder of this paper is organised as follows. Section~\ref{sec:related} reviews
+related work across unimodal emotion recognition, multimodal fusion, and clinical MER.
+Section~\ref{sec:method} describes the proposed architecture in detail.
+Section~\ref{sec:validation} presents the validation harness and experimental setup.
+Section~\ref{sec:results} reports results from the harness evaluation.
+Section~\ref{sec:discussion} discusses implications, design insights, and limitations.
+Section~\ref{sec:conclusion} concludes with future research directions.
+
+
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Unimodal Emotion Recognition}
+
+\textbf{Speech/Audio.} Self-supervised speech models have become the de facto standard for
+paralinguistic emotion recognition. WavLM~\cite{chen2022wavlm} extends the HuBERT
+framework with denoising and speaker-aware pretraining, achieving state-of-the-art
+performance on emotion recognition benchmarks. Whisper encoder features have recently
+shown promise as depression markers~\cite{sadeghi2024}. Conformer architectures combine
+convolution and self-attention for streaming acoustic emotion recognition.
+Despite strong performance on clean corpora, speech emotion recognition degrades sharply
+under noise, codec compression, and non-English prosody, and cross-corpus generalisation
+to clinical populations remains poor~\cite{survey2026multimodal}.
+
+\textbf{Computer Vision.} Facial expression recognition (FER) has been transformed by
+vision transformers. DINOv2~\cite{oquab2023dinov2} produces self-supervised features
+that transfer strongly to facial affect tasks. Action Unit (AU) detection provides
+anatomically grounded alternatives to holistic emotion classification and is less prone
+to spurious correlations. Clinical FER faces additional challenges: variable lighting,
+head pose, occlusions (masks), and limited labelled clinical video datasets.
+Synthetic augmentation and domain adaptation for clinical FER remain
+under-explored~\cite{survey2025mer}.
+
+\textbf{Language Models.} For textual emotion and sentiment analysis, RoBERTa and
+DeBERTa-v3 provide strong baselines. Domain-adapted variants such as
+MentalBERT~\cite{ji2022mentalbert} and ClinicalBERT are fine-tuned on mental health
+text and clinical notes, capturing specialised vocabulary. Large language models offer
+zero-shot emotion reasoning with interpretable explanations but at high compute cost
+and with a tendency to hallucinate emotion rationales. Clinical utterances are often
+short, and inter-annotator agreement on clinical emotion labels is low~\cite{survey2025mer}.
+
+\subsection{Multimodal Fusion Architectures}
+
+Multimodal fusion is the central design challenge for MER. Approaches can be categorised
+along a spectrum of cross-modal interaction depth. \textbf{Early fusion} concatenates
+features from each modality before prediction; it is simple but ignores cross-modal
+dynamics and requires all modalities at inference time. \textbf{Late fusion} ensembles
+independent unimodal predictions, offering robustness to missing modalities but losing
+fine-grained cross-modal interaction. \textbf{Intermediate fusion}---the current
+state-of-the-art paradigm---includes cross-modal Transformers (MulT, 2019)~\cite{tsai2019mult},
+which apply pairwise cross-attention between modalities; hierarchical gated fusion
+(AEFNet, 2025)~\cite{aefnet2025}, which stacks unimodal, bimodal, and trimodal gates;
+adaptive exchange fusion (AMTE, 2025)~\cite{amte2025}, which supplements weak local
+features with strong global features from another modality; and graph-based fusion
+(Mi-CGA, 2025)~\cite{micga2025}, which uses cross-modal graph attention for robustness
+to missing modalities.
+
+Unified frameworks combining variational mixture-of-experts with cross-attentional
+modality interaction have recently achieved over 99\% accuracy on MELD and
+IEMOCAP~\cite{unifiedmer2025}. However, these results are on curated lab datasets with
+clean, well-aligned modalities; clinical deployment introduces noise, missing data,
+and systematic dropout patterns that these frameworks have not been tested against.
+
+\subsection{Clinical Mental Health MER}
+
+A smaller but growing body of work applies MER specifically to depression detection.
+MDD-MARF~\cite{zhou2025mddmarf} combines tri-modal (audio+video+text) multi-level
+attention with residual fusion, achieving the current state-of-the-art on DAIC-WOZ with
+MAE 3.13 and RMSE 3.59 on PHQ-8 prediction. The DSTC
+framework~\cite{dstc2025} uses Temporal ProbSparse Attention with position-guided
+multimodal cross-fusion, reporting MAE 4.22 on E-DAIC. Pr3+Whisper+AudioQual~\cite{sadeghi2024}
+leverages LLM-based text features with speech quality filtering for fully automated
+depression detection, achieving MAE 3.86 on E-DAIC.
+
+Three critical gaps persist across all existing clinical MER work. \textbf{Missing-modality
+robustness} has not been evaluated under clinical (non-random) dropout patterns---prior
+studies ablate entire modalities but do not model the correlated dropout observed in
+real therapy sessions. \textbf{Session-level temporal modelling} is absent: DSIN~\cite{dsin2025}
+and DSTC~\cite{dstc2025} process short clips or aggregate via pooling, ignoring the
+therapeutic phase structure of clinical interviews. \textbf{Clinical interpretability}
+is lacking: ECMC~\cite{ecmc2026} generates free-text emotion captions but does not map
+predictions to standardised diagnostic items. Our architecture is designed to address
+all three gaps simultaneously.
+
+
+\section{Proposed Architecture}
+\label{sec:method}
+
+Figure~\ref{fig:arch} provides an overview of the full architecture. The pipeline
+proceeds through four stages: (1) unimodal encoding via pretrained backbones,
+(2) cross-modal gated exchange fusion, (3) session-level hierarchical temporal modelling,
+and (4) clinical concept bottleneck prediction.
+
+\begin{figure}[h]
+\centering
+\begin{verbatim}
+                        PHQ-8 Total (B,)
+                             |
+                        PHQ-8 Items (B, 8)
+                             |
+                   Clinical Concept Bottleneck
+                   8 PHQ-8-aligned concepts (B, 8)
+                             |
+                   Session Representation (B, d_s)
+                             |
+           Session-Level Hierarchical Transformer
+          Phase Emb. + Bidirectional MHSA × 4 + Pool
+                             |
+          Cross-Modal Gated Exchange Fusion (CM-GEF)
+         Quality Est. + Exchange Attn + Gate + Aggregate
+                             |
+       +-------------+ +----------+ +----------------+
+       | WavLM Base+ | | DINOv2   | | MentalBERT     |
+       | (audio)     | | (video)  | | (text)         |
+       | d=768       | | d=384    | | d=768          |
+       +-------------+ +----------+ +----------------+
+\end{verbatim}
+\caption{Overview of the proposed MER architecture. Three pretrained unimodal encoders
+feed into CM-GEF for cross-modal fusion. Fused utterance representations pass through
+the SLHT for session-level temporal modelling with therapeutic phase awareness,
+then through the CCB for clinically interpretable PHQ-8 prediction.}
+\label{fig:arch}
+\end{figure}
+
+\subsection{Unimodal Encoders}
+
+Each modality is processed by a pretrained encoder that remains frozen during Stage~1
+fusion pretraining and receives LoRA adapters during Stage~2 clinical adaptation.
+\textbf{Audio} is encoded by WavLM Base Plus~\cite{chen2022wavlm}, which processes 16~kHz
+raw waveforms. Attention-weighted mean pooling produces a fixed-dimension utterance
+representation of $d_{\text{audio}} = 768$. \textbf{Video} is encoded by DINOv2
+Small~\cite{oquab2023dinov2}, which processes 30 uniformly sampled $224\times224$ facial
+crops per utterance and produces $d_{\text{video}} = 384$ features via [CLS] token
+pooling. \textbf{Text} is encoded by MentalBERT~\cite{ji2022mentalbert}, which tokenises
+utterances up to 128 tokens and produces $d_{\text{text}} = 768$ features via [CLS] plus
+attention-weighted sequence pooling. Each encoder feeds into a lightweight projection MLP
+($d_m \to d_{\text{proj}} = 256$) that unifies all modalities to a common latent
+dimension.
+
+\subsection{Modality Quality Estimators}
+
+A key design requirement is the ability to detect when a modality is unreliable. For each
+utterance, a lightweight MLP head predicts the modality's quality from the pooled encoder
+features~\cite{amte2025}. The quality estimator is a three-class classifier---clean,
+degraded, or absent---trained on synthetic corruptions (noise injection, face occlusion,
+text truncation). The reliability score $r_m \in [0, 1]$ for modality $m$ is the
+softmax probability of the ``clean'' class:
+
+\begin{equation}
+  \mathbf{h} = \text{GELU}(\mathbf{W}_1 \text{LayerNorm}(\mathbf{f}_m)),
+  \quad
+  \mathbf{p} = \text{softmax}(\mathbf{W}_2 \mathbf{h}),
+  \quad
+  r_m = p_0.
+  \label{eq:quality}
+\end{equation}
+
+During Stage~2 clinical fine-tuning, the quality estimators can be run in inference mode
+to prevent feature collapse from distribution shift. The reliability scores play a dual
+role: they gate the cross-modal substitution and weight the final aggregation.
+
+\subsection{Cross-Modal Gated Exchange Fusion (CM-GEF)}
+\label{sec:cmgef}
+
+CM-GEF is the central fusion mechanism. For each utterance, each modality $m$ computes a
+cross-modal context vector by attending to the other two modalities via multi-head exchange
+attention. A per-dimension gate then interpolates between the modality's own projected
+features $\mathbf{f}_m$ and the cross-modal context $\mathbf{ctx}_m$, modulated by the
+estimated reliability $r_m$:
+
+\begin{align}
+  \mathbf{ctx}_m &= \text{MultiHeadAttention}(\mathbf{Q}=\mathbf{f}_m,
+                    \mathbf{KV}=[\mathbf{f}_j; \mathbf{f}_k]),
+  \label{eq:exchange}\\
+  \mathbf{gate}_m &= \sigma\big(\mathbf{W}_g[\mathbf{f}_m; \mathbf{ctx}_m; r_m]\big),
+  \label{eq:gate}\\
+  \mathbf{f}_m^{\text{fused}} &= \mathbf{gate}_m \odot \mathbf{f}_m
+                               + (1 - \mathbf{gate}_m) \odot \mathbf{ctx}_m.
+  \label{eq:substitution}
+\end{align}
+
+The per-dimension gating---rather than a scalar modality-level gate---is an intentional
+design choice: a modality may be unreliable in some feature subspaces (e.g., audio timbre
+distorted) while remaining reliable in others (e.g., audio pitch preserved).
+
+The three gated representations are aggregated via softmax weights proportional to the
+reliability scores, providing a second line of defence against unreliable modalities:
+
+\begin{equation}
+  \mathbf{f}^{\text{utt}} = \sum_{m \in \{a,v,t\}}
+    \frac{\exp(r_m)}{\sum_{j}\exp(r_j)} \; \mathbf{f}_m^{\text{fused}}.
+  \label{eq:aggregation}
+\end{equation}
+
+The exchange attention and gated substitution may be stacked for $L_{\text{ex}}$ layers
+(default $L_{\text{ex}} = 2$) with residual connections and feed-forward blocks,
+enabling iterative cross-modal refinement.
+
+\paragraph{Design rationale.}
+Per-dimension gating provides finer-grained control than scalar modality-level gates,
+at the cost of increased capacity (which may overfit on small clinical datasets---we
+mitigate this with gate entropy regularisation and dropout). Multi-head exchange
+attention allows different heads to specialise on different cross-modal patterns
+(e.g., attending to lip movements in video versus sentiment in text), a capability
+well-established in multimodal Transformers~\cite{tsai2019mult}. The dual-gating
+mechanism (gated substitution via Eq.~\ref{eq:substitution} plus reliability-weighted
+aggregation via Eq.~\ref{eq:aggregation}) provides robustness redundancy; ablation
+studies isolate the contribution of each.
+
+\subsection{Session-Level Hierarchical Transformer (SLHT)}
+
+Clinical interviews unfold over 30--60 minutes with a well-defined structure: rapport-building
+(first~$\sim$5~min), exploration (open-ended probes), intervention (targeted clinical
+questions), and closure (wrap-up). Depression markers manifest differently across these
+phases---flat affect during rapport-building may indicate sustained depression, while
+emotional reactivity during intervention probes is a positive prognostic sign.
+
+SLHT captures this structure through four mechanisms:
+
+\textbf{(1) Phase embedding.} Each utterance receives a learned embedding of its
+therapeutic phase (one of four), which is concatenated with the fused utterance feature
+before projection into the session model dimension.
+
+\textbf{(2) Position encoding.} Learned position encodings index utterances by their
+temporal order within the session (up to $T_{\max} = 512$).
+
+\textbf{(3) Bidirectional Transformer.} $L_{\text{sess}} = 4$ layers of multi-head
+self-attention and feed-forward blocks process the full utterance sequence. Bidirectional
+(rather than causal) attention is used because the entire session is available for
+post-hoc analysis, and early emotional cues gain context from later utterances.
+
+\textbf{(4) Phase-level pooling.} For each of the four phases, utterances belonging to
+that phase are pooled via cross-attention between a phase-level query and the full
+utterance sequence, producing per-phase representations. A learned importance weight
+over phases produces the final session representation:
+
+\begin{equation}
+  \mathbf{s} = \sum_{p=1}^{4} \alpha_p \, \mathbf{\psi}_p + \text{mean}(\mathbf{h}),
+  \qquad
+  \alpha_p = \text{softmax}(\mathbf{w}_{\text{imp}}^\top \mathbf{\psi}_p).
+  \label{eq:session}
+\end{equation}
+
+The residual global context $\text{mean}(\mathbf{h})$ ensures that even if some phases
+contain few utterances, the session representation retains a complete view.
+
+\subsection{Clinical Concept Bottleneck (CCB)}
+
+Rather than predicting PHQ-8 scores directly from session features, CCB first maps the
+session representation through an interpretable intermediate layer of 8 clinical concepts
+aligned to DSM-5 depression criteria (anhedonia, depressed mood, sleep disturbance,
+fatigue, appetite change, guilt/worthlessness, concentration problems, psychomotor change).
+Each concept score $c_k \in [0, 1]$ is produced by a sigmoid-activated MLP:
+
+\begin{equation}
+  \mathbf{c} = \sigma\big(\mathbf{W}_{c2}\,
+               \text{GELU}(\mathbf{W}_{c1}\,
+               \text{LayerNorm}(\mathbf{s}))\big).
+  \label{eq:concept}
+\end{equation}
+
+PHQ-8 item scores $\mathbf{i} \in [0, 3]^8$ are computed from the concept scores via a
+learned weight matrix with a diagonal-dominant prior (each concept $k$ primarily maps to
+item $k$). The total score is the sum of items, and binary depression classification uses
+a sigmoid over concept scores. This structure makes the model's reasoning transparent:
+clinicians can inspect which concepts were activated and verify that the concept-to-item
+mapping is clinically sensible, analogous to concept bottleneck models in other
+domains~\cite{koh2020concept}.
+
+\subsection{Two-Stage Training Pipeline}
+
+The training pipeline follows a two-stage strategy designed for scarce clinical labelled
+data. In \textbf{Stage~1} (fusion pretraining), the unimodal encoders are frozen while
+the projection MLPs, quality estimators, CM-GEF, SLHT, and CCB are trained on large-scale
+in-the-wild emotion data (CMU-MOSEI, MELD, IEMOCAP; approximately 47k multimodal
+utterances) with a multi-task loss of emotion classification, modality dropout
+reconstruction, and quality estimation. In \textbf{Stage~2} (clinical adaptation), LoRA
+adapters ($r=8, \alpha=16$) are applied to the encoder backbones while the fusion and
+prediction heads are fine-tuned on clinical data (DAIC-WOZ/E-DAIC; approximately 189--275
+sessions) with a loss combining PHQ-8 MAE, binary cross-entropy for depression
+classification, and optional concept supervision.
+
+
+\section{Validation Infrastructure}
+\label{sec:validation}
+
+The validation harness is designed to verify architectural correctness and characterise
+structural properties of the design. It operates entirely on synthetic data---no real
+clinical datasets are required, and no model training has been conducted. All benchmarks
+use randomly initialised weights to test the \emph{infrastructure}, not model performance.
+Results are reported on a single CPU node (AMD EPYC 7B12, 8 cores) with bf16 tests
+requiring an NVIDIA A100 80~GB GPU.
+
+\subsection{Layer~1: Unit Tests}
+
+The pytest suite contains 35+ tests organised into nine classes:
+
+\begin{itemize}
+  \item \textbf{Shape correctness} (9 tests): verifies that every component produces the
+        expected output dimensions for single-utterance, full-session, and streaming
+        modes, across variable utterance counts ($T \in \{4, 8, 16\}$).
+  \item \textbf{Gradient flow} (7 tests): verifies that loss gradients reach all actively
+        used trainable parameters, including CM-GEF, SLHT, CCB, quality estimators, and
+        LoRA adapters (Stage~2). Checks for NaN and Inf gradients.
+  \item \textbf{Numerical stability} (7 tests): verifies forward pass stability in
+        bfloat16 and float16, under extreme input magnitudes ($\times 1000$), silent
+        audio, and complete modality absence.
+  \item \textbf{Domain correctness} (24 tests): covers missing modality robustness
+        (single-modality input, modality dropout augmentation, weight normalisation),
+        concept bottleneck range constraints (scores $\in [0,1]$, items $\in [0,3]$,
+        total $\in [0,24]$), diagonal-dominant initialisation, quality estimator bounds,
+        session transformer variable-length handling, and training pipeline stage
+        configuration.
+\end{itemize}
+
+\subsection{Layer~2: Domain Benchmarks}
+
+Seven synthetic benchmarks probe specific design properties:
+
+\begin{enumerate}
+  \item \textbf{Missing modality stress.} Evaluates under 0\%, 20\%, 40\%, and 60\%
+        random dropout per modality, measuring MAE degradation from the full-modality
+        baseline.
+  \item \textbf{Clinical dropout patterns.} Three clinically-correlated patterns: vision
+        drop during distress (40\% video missing), audio drop in noisy environment (30\%
+        audio missing), and text drop when non-verbal (40\% text + 10\% audio/video).
+  \item \textbf{Late fusion comparison.} Compares CM-GEF against a simple late fusion
+        baseline (mean of available modality features) under 0\% and 40\% dropout.
+  \item \textbf{Quality estimator sensitivity.} Measures whether reliability scores
+        differ between clean and synthetically corrupted features.
+  \item \textbf{Sustained affect proxy.} Compares session-level representation separation
+        (SLHT) vs. utterance-level mean pooling for sessions with artificially induced
+        ``flat affect'' segments (low-amplitude waveform).
+  \item \textbf{Concept mapping fidelity.} Verifies diagonal dominance
+        ($\text{diag}/\text{off-diag} > 2$) of the concept-to-item weight matrix.
+  \item \textbf{Throughput profiling.} Measures inference latency, memory usage, and
+        estimated FLOPs.
+\end{enumerate}
+
+\subsection{Layer~3: Ablations}
+
+Ten single-field \texttt{ModelConfig} ablations isolate the contribution of each
+architectural decision (Table~\ref{tab:ablations}). Each ablation compares a baseline
+model against an otherwise identical model with one hyperparameter changed, measuring
+MAE on clean and 20\%-dropout synthetic data.
+
+\begin{table}[h]
+\caption{Summary of the ten single-field ablations in the validation suite. Each
+ablation tests a specific design hypothesis by modifying a single
+\texttt{ModelConfig} field.}
+\label{tab:ablations}
+\centering
+\begin{tabular}{lll}
+\toprule
+\# & Ablation & Config field change \\
+\midrule
+1 & Drop CM-GEF $\to$ late fusion & $n_{\text{exchange\_layers}}: 2 \to 0$ \\
+2 & Scalar gates $\to$ per-dim gates & $\text{exchange\_hidden\_dim}: 128 \to 0$ \\
+3 & Drop quality estimators & $n_{\text{audio\_quality\_classes}}: 3 \to 0$ \\
+4 & Drop phase embeddings & $n_{\text{therapeutic\_phases}}: 4 \to 1$ \\
+5 & Drop session Transformer $\to$ mean pool & $n_{\text{session\_layers}}: 4 \to 0$ \\
+6 & LoRA vs. full fine-tune & $\text{lora\_r}: 8 \to 0$ \\
+7 & Drop concept bottleneck & $n_{\text{clinical\_concepts}}: 8 \to 0$ \\
+8 & Drop dropout simulation & $p_{\text{dropout}}: 0.15 \to 0.0$ \\
+9 & WavLM Base+ vs. Small & $\text{audio\_encoder\_name}$ changed \\
+10 & Bidirectional vs. causal session & $\text{streaming\_mode}: \text{False} \to \text{True}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\section{Results}
+\label{sec:results}
+
+All results reported here are from the validation harness running on a randomly
+initialised (untrained) model. They verify the correctness and structural properties of
+the architecture---they are \emph{not} measures of clinical performance, which requires
+trained-model evaluation on real clinical datasets.
+
+\subsection{Architectural Correctness}
+
+All 35+ unit tests pass across all test classes. Key structural verifications:
+
+\textbf{Output shapes.} The model produces correct tensor shapes for all three operating
+modes. Single-utterance encoding yields $(\text{batch}, d_{\text{proj}})$ with
+$d_{\text{proj}} = 256$ at default config. Full-session forward yields
+$(\text{batch},)$ for PHQ-8 total, $(\text{batch}, 8)$ for PHQ-8 items and concept
+scores, $(\text{batch}, d_{\text{session}})$ for session representation, and
+$(\text{batch}, 4, d_{\text{session}})$ for per-phase representations. Variable
+session lengths $T \in \{4, 8, 16\}$ are handled correctly.
+
+\textbf{Gradient flow.} All actively used trainable parameters receive non-NaN,
+non-Inf gradients in both Stage~1 (fusion modules trainable, encoders frozen) and
+Stage~2 (LoRA adapters trainable). Gradient flow reaches all four novel blocks:
+CM-GEF, SLHT, CCB, and quality estimators.
+
+\textbf{Numerical stability.} Forward passes are stable in bfloat16: PHQ-8 total and
+item scores remain finite with no NaN or Inf values. Stability holds under extreme
+input scaling ($\times 1000$), silent audio (all-zero waveforms), and complete modality
+absence (all three modalities masked out). Gate values maintain diversity across the
+batch (mean per-gate within $[0.05, 0.95]$), confirming the absence of gate saturation.
+
+\subsection{Parameter Counts and Complexity}
+
+The default configuration ($d_{\text{proj}} = 256$, $d_{\text{session}} = 256$,
+$L_{\text{ex}} = 2$, $L_{\text{sess}} = 4$) yields approximately 23~M total parameters.
+Of these, approximately 3~M are trainable in Stage~1 (projection MLPs, quality
+estimators, fusion, session transformer, concept bottleneck) and approximately 10.5~M
+are trainable in Stage~2 (adding LoRA adapters on encoder backbone projections).
+Time complexity is $O(d_{\text{proj}}^2)$ per utterance for CM-GEF and
+$O(T^2 \cdot d_{\text{session}})$ per session for the bidirectional SLHT, where
+$T \leq 512$. The concept bottleneck contributes negligible overhead (approximately
+0.5~M parameters).
+
+\subsection{Synthetic Benchmark Results}
+
+\paragraph{Concept mapping fidelity.} The concept-to-item weight matrix is initialised
+with a diagonal-dominant prior. The ratio of diagonal to mean off-diagonal weight
+magnitude exceeds 100 ($\gg 2$ pass criterion), confirming that each PHQ-8 item is
+primarily influenced by its corresponding clinical concept at initialisation.
+
+\paragraph{Quality estimator sensitivity.} With random initialisation, reliability
+scores show limited sensitivity to synthetic corruption---differences between clean
+and noisy inputs are below 0.001 on average. This is expected, as the quality estimators
+require supervised training on synthetic corruptions before they become sensitive.
+The training infrastructure (synthetic corruption labels, MLP classifier head,
+multi-task loss) is in place and verified.
+
+\paragraph{Throughput.} Profiling on CPU with the default config estimates approximately
+4.4~GFLOP per sample (Kaplan~\etal{} scaling estimate for transformer-heavy models:
+$6 \times \text{params} \times T$, with $T = 32$).
+% TODO: not yet measured — requires GPU benchmark with trained model.
+
+\subsection{Ablation Infrastructure}
+
+All ten ablations execute successfully and produce quantitative comparisons
+(clean MAE, dropout MAE, parameter count) between the baseline and ablated
+configurations. The ablation runner verifies that each single-field change produces
+a valid model without breaking the forward pass.
+% TODO: not yet measured — effect sizes require trained-model evaluation on clinical data.
+
+
+\section{Discussion}
+\label{sec:discussion}
+
+The validation harness confirms that the proposed architecture is structurally sound:
+it produces correct tensor shapes across all operating modes, maintains gradient flow
+through all trainable components, and remains numerically stable under extreme conditions
+including bf16 precision, large input magnitudes, and complete modality absence. These
+properties are necessary---though not sufficient---for clinical deployment.
+
+\subsection{Design Insights from the Harness}
+
+Several structural properties emerge from the harness characterisation. \textbf{The
+triple-redundancy missing-modality strategy} (quality estimator $\to$ gated substitution
+$\to$ reliability-weighted aggregation) is computationally lightweight: the quality
+estimators add fewer than 0.15~M parameters, and the exchange attention is linear in
+the number of source modalities. \textbf{The per-dimension gate mechanism} provides
+inherently more capacity than scalar gating, but raises the risk of overfitting on
+small clinical datasets---the ablation comparing per-dimension vs. scalar gates
+(ablation~\#2) is designed to quantify this trade-off. \textbf{The session-level
+Transformer} captures full-session context at $O(T^2)$ cost; for $T = 512$ utterances,
+this produces approximately 262k attention scores per layer, which is manageable on a
+single A100 but may require linear attention variants for edge deployment.
+
+Compared to existing clinical MER architectures, our design uniquely integrates four
+capabilities: adaptive cross-modal gating informed by learned modality quality,
+session-level temporal modelling with therapeutic phase awareness, clinically grounded
+interpretability via a concept bottleneck, and parameter-efficient clinical adaptation
+via LoRA. No prior single architecture combines all four.
+
+\paragraph{Limitations.}
+The primary limitation is that no model has been trained or evaluated on real clinical
+data. All results reported are from the validation harness operating on synthetic data
+with randomly initialised weights. Consequently:
+
+\begin{itemize}
+  \item All performance targets from the research contract (MAE $< 3.0$ on E-DAIC,
+        RMSE $< 3.5$, $<15\%$ degradation under 40\% dropout, $\geq 10\%$ sustained
+        affect F1 gain) remain \texttt{TODO: unverified}.
+  \item The quality estimators require supervised training on synthetic corruptions
+        before their sensitivity can be assessed; random-initialisation benchmarks
+        show low sensitivity as expected.
+  \item Phase labelling relies on heuristic time-window assignment; inter-annotator
+        agreement with clinical experts has not been measured.
+  \item The clinically-correlated dropout simulation protocol (three patterns) is
+        heuristic, not validated against real clinical dropout distributions.
+  \item Fairness evaluation and clinician interpretability studies are deferred pending
+        access to sufficiently diverse clinical data and domain experts.
+  \item The MDD-MARF baseline~\cite{zhou2025mddmarf} (current SOTA on DAIC-WOZ) has
+        not been re-implemented for comparison.
+\end{itemize}
+
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have presented a reference architecture and comprehensive validation harness for
+multimodal emotion recognition in mental health diagnostics. The architecture introduces
+Cross-Modal Gated Exchange Fusion (CM-GEF) with per-dimension feature substitution
+guided by learned modality quality estimates, a Session-Level Hierarchical Transformer
+(SLHT) with therapeutic phase embeddings that model the temporal structure of clinical
+interviews, and a Clinical Concept Bottleneck (CCB) that maps session representations
+through DSM-5-aligned clinical constructs for interpretable PHQ-8 prediction. The
+validation harness provides 35+ unit tests, seven synthetic benchmarks, and ten
+single-field ablations, all operating on synthetic data with no dependency on clinical
+datasets.
+
+We release the typed \texttt{ModelConfig} contract, the complete PyTorch reference
+implementation, and the validation suite as an open-source foundation for reproducible
+clinical MER research. Our contribution is a design artifact---the architecture and the
+infrastructure to characterise it---not a trained model with empirical superiority claims.
+
+Concrete follow-up directions include: (1) integrating DAIC-WOZ and E-DAIC data loaders
+and conducting the two-stage training pipeline to measure real clinical metrics;
+(2) implementing the MDD-MARF baseline and comparing against CM-GEF on identical
+clinical train/test splits; (3) running systematic label-efficiency sweeps ($5\%$,
+$10\%$, $25\%$, $50\%$, $100\%$ of clinical data) to validate the LoRA adaptation
+hypothesis; (4) conducting a clinician Likert-scale study to assess the interpretability
+of concept-bottleneck explanations; and (5) evaluating demographic fairness on
+population subgroups where data permits. We hope this architecture and infrastructure
+serve the community as a reproducible starting point for clinically-validated MER.
+
+
+% Acknowledgments omitted for anonymous submission.
+% \begin{ack}
+% This work was supported by ...
+% \end{ack}
+
+
+\section*{References}
+
+{\small
+\begin{thebibliography}{99}
+
+\bibitem{who2023depression}
+  World Health Organization.\ (2023).
+  Depressive disorder (depression).
+  \textit{WHO Fact Sheet}.
+
+\bibitem{survey2026multimodal}
+  Survey: State-of-the-art Multimodal Emotion Recognition (2026).
+  \textit{Intelligent Systems with Applications}.
+
+\bibitem{chen2022wavlm}
+  Chen, S., Wang, C., Chen, Z., Wu, Y., Liu, S., Chen, Z., Li, J., Kanda, N.,
+  Yoshioka, T., Xiao, X., \& others.\ (2022).
+  WavLM: Large-scale self-supervised pre-training for full stack speech processing.
+  \textit{IEEE Journal of Selected Topics in Signal Processing}, 16(6), 1505--1518.
+
+\bibitem{hsu2021hubert}
+  Hsu, W.-N., Bolte, B., Tsai, Y.-H.H., Lakhotia, K., Salakhutdinov, R., \&
+  Mohamed, A.\ (2021).
+  HuBERT: Self-supervised speech representation learning by masked prediction of hidden
+  units. \textit{IEEE/ACM Transactions on Audio, Speech, and Language Processing}, 29,
+  3451--3460.
+
+\bibitem{oquab2023dinov2}
+  Oquab, M., Darcet, T., Moutakanni, T., Vo, H., Szafraniec, M., Khalidov, V.,
+  Fernandez, P., Haziza, D., Massa, F., El-Nouby, A., \& others.\ (2023).
+  DINOv2: Learning robust visual features without supervision.
+  \textit{arXiv:2304.07193}.
+
+\bibitem{ji2022mentalbert}
+  Ji, S., Zhang, T., Ansari, L., Fu, J., Tiwari, P., \& Cambria, E.\ (2022).
+  MentalBERT: Publicly available readable language model for mental health.
+  \textit{Proceedings of the 13th International Workshop on Health Text Mining and
+  Information Analysis}, 64--72.
+
+\bibitem{tsai2019mult}
+  Tsai, Y.-H.H., Bai, S., Liang, P.P., Kolter, J.Z., Morency, L.-P., \&
+  Salakhutdinov, R.\ (2019).
+  Multimodal Transformer for unaligned multimodal language sequences.
+  \textit{Proceedings of the 57th Annual Meeting of the ACL}, 6558--6569.
+
+\bibitem{aefnet2025}
+  AEFNet (2025).
+  Adaptive External Attention-Enhanced Fusion Network for multimodal emotion recognition.
+  \textit{Alexandria Engineering Journal}.
+
+\bibitem{amte2025}
+  AMTE (2025).
+  Adaptive Multimodal Transformer based on Exchanging for multimodal emotion recognition.
+  \textit{Scientific Reports}.
+
+\bibitem{micga2025}
+  Mi-CGA (2025).
+  Cross-modal Graph Attention for incomplete multimodal emotion recognition.
+  \textit{Neurocomputing}.
+
+\bibitem{unifiedmer2025}
+  Unified MER Framework (2025).
+  Homogeneous and heterogeneous multimodal fusion for emotion recognition.
+  \textit{Information Fusion}.
+
+\bibitem{sadeghi2024}
+  Sadeghi, M., \etal\ (2024).
+  Pr3+Whisper+AudioQual for depression detection on E-DAIC.
+  \textit{Interspeech / IEEE}.
+
+\bibitem{zhou2025mddmarf}
+  Zhou, Ge, \etal\ (2025).
+  MDD-MARF: Multi-level attention residual fusion for depression detection.
+  \textit{Journal of Biomedical Informatics}.
+
+\bibitem{dstc2025}
+  DSTC (2025).
+  Temporal ProbSparse Attention Transformer for depression detection from multimodal data.
+  \textit{IEEE Transactions on Affective Computing}.
+
+\bibitem{dsin2025}
+  DSIN (2025).
+  Deep Spatiotemporal Interaction Network for multimodal emotion recognition.
+  \textit{Information Sciences}.
+
+\bibitem{ecmc2026}
+  ECMC (2026).
+  Emotion-Cognition Captioning for Mental Health.
+  \textit{Proceedings of AAAI 2026}.
+
+\bibitem{koh2020concept}
+  Koh, P.W., Nguyen, T., Tang, Y.S., Mussmann, S., Pierson, E., Kim, B., \&
+  Liang, P.\ (2020).
+  Concept bottleneck models.
+  \textit{Proceedings of ICML 2020}, 5338--5348.
+
+\bibitem{kroenke2009phq}
+  Kroenke, K., Strine, T.W., Spitzer, R.L., Williams, J.B.W., Berry, J.T., \&
+  Mokdad, A.H.\ (2009).
+  The PHQ-8 as a measure of current depression in the general population.
+  \textit{Journal of Affective Disorders}, 114(1--3), 163--173.
+
+\bibitem{survey2025mer}
+  Survey: Recent Advances in Multimodal Affective Computing (2026).
+  \textit{arXiv:2409.07388}.
+
+\end{thebibliography}
+}
+
+
+\newpage
+\section*{NeurIPS Paper Checklist}
+
+\paragraph{1. Claims.}
+Do the main claims made in the abstract and introduction accurately reflect the paper's
+contributions and scope?
+\textbf{Yes.}
+The claims are scoped to a reference architecture and validation harness, not to
+trained-model performance on clinical data.
+
+\paragraph{2. Experiments.}
+Does the paper describe all experiments and are they reproducible?
+\textbf{Yes.}
+All experiments are synthetic benchmarks running via a single \texttt{pytest} or
+\texttt{python} command. Commands are documented in each source file header.
+
+\paragraph{3. Theory.}
+Does the paper include theoretical results?
+\textbf{No.}
+The paper presents an architecture with inductive-bias justifications and complexity
+analysis but no formal theoretical bounds.
+
+\paragraph{4. Datasets.}
+Does the paper discuss datasets used?
+\textbf{No.}
+All experiments use synthetic data. Real clinical datasets (DAIC-WOZ, E-DAIC) are
+discussed as intended targets for future work but are not used in this paper.
+
+\paragraph{5. Code.}
+Does the paper provide code and is it well-documented?
+\textbf{Yes.}
+The full PyTorch reference implementation, typed configuration, and validation suite
+are released as open source. All files include docstrings and shape annotations.
+
+\paragraph{6. Broader Impacts.}
+Does the paper discuss potential broader impacts?
+\textbf{Yes.}
+The paper discusses the intended clinical application, the importance of demographic
+fairness evaluation, and the need for clinician-in-the-loop validation before deployment.
+Potential risks of deployment without adequate validation are acknowledged in the
+limitations section.
+
+\paragraph{7. Compute.}
+Does the paper report compute resources used?
+\textbf{Partial.}
+The validation harness runs on CPU (single node, 8 cores). bf16 numerical stability
+tests require an NVIDIA A100 80~GB GPU. Training resource estimates (e.g., ``4 hours
+on 4$\times$A100'' for Stage~1) are documented as intended configurations in the
+training recipe but have not been empirically verified.
+
+\end{document}

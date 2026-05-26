@@ -1,0 +1,49 @@
+{
+  "verdict": "needs_revision",
+  "iteration": 2,
+  "summary": "The draft is substantially improved and now largely respects the reference-architecture scope contract, with the previous missing-file blocker resolved. Remaining issues are concentrated in unsupported or likely fabricated citation entries, plus one factual mismatch between the manuscript and the validator artifacts about baseline coverage.",
+  "issues": [
+    {
+      "id": "i_02",
+      "severity": "blocker",
+      "category": "citations",
+      "location": "References; citations to survey2026multimodal, survey2025mer, aefnet2025, amte2025, micga2025, unifiedmer2025, zhou2025mddmarf, dstc2025, dsin2025, ecmc2026",
+      "problem": "Multiple bibliography entries are not given with enough identifying information to verify that the cited works actually exist, and several read like placeholders or generic paper nicknames rather than traceable references (e.g., 'Survey: State-of-the-art Multimodal Emotion Recognition (2026)', 'AEFNet (2025)', 'AMTE (2025)', 'Mi-CGA (2025)', 'Unified MER Framework (2025)', 'DSTC (2025)', 'DSIN (2025)', 'ECMC (2026)'). Because these references underpin core related-work and gap claims, unverifiable citations are a submission-blocking problem.",
+      "suggested_fix": "Replace each placeholder-style entry with a fully traceable bibliographic record (real authors, exact title, venue, year, pages/DOI/arXiv id), or remove the claim if a verifiable source cannot be provided. Recheck every in-text claim that depends on these citations after cleaning the bibliography.",
+      "persisted_from_previous": false
+    },
+    {
+      "id": "i_03",
+      "severity": "major",
+      "category": "factual",
+      "location": "Validation Infrastructure, Layer 2 and Layer 3; Abstract sentence on 'comprehensive validation harness'; Introduction contribution list bullet 3; Table 1 ablation description; Discussion limitations",
+      "problem": "The paper's wording implies that baseline coverage inside the harness is comprehensive, but validator/research_eval/experiment_coverage.md states that two required baselines are still missing: naive early fusion and MDD-MARF. The manuscript does acknowledge MDD-MARF is not re-implemented in the limitations, but elsewhere it still describes the harness in a way that overstates coverage.",
+      "suggested_fix": "Qualify the harness description wherever it currently sounds complete: state explicitly that late-fusion comparison and several ablations are implemented, while early-fusion and MDD-MARF baselines remain future work. Keep the limitations disclosure, but also align the abstract/introduction/validation sections with the actual coverage reported by experiment_coverage.md.",
+      "persisted_from_previous": false
+    },
+    {
+      "id": "i_04",
+      "severity": "major",
+      "category": "claims",
+      "location": "Results, Throughput paragraph; NeurIPS checklist item 7; Discussion 'single A100' statement",
+      "problem": "The draft mixes measured and unmeasured compute claims. It reports hardware for the validation harness, but also includes throughput/FLOP discussion and checklist language that can be read as empirical resource reporting even though upstream artifacts mark several GPU/training figures as estimated and note that no end-to-end training script exists. The manuscript should more clearly separate measured harness profiling from intended or estimated training configurations.",
+      "suggested_fix": "Label every unmeasured compute figure explicitly as an estimate derived from design documents, not an empirical run. In the checklist and discussion, distinguish 'measured validation-harness profiling' from 'intended training recipe / estimated hardware budget', and avoid wording that suggests those training-resource numbers were experimentally verified.",
+      "persisted_from_previous": false
+    }
+  ],
+  "scope_check": {
+    "overstates_empirical_results": false,
+    "claims_sota_without_numbers": false,
+    "relabels_synthetic_as_real": false,
+    "demands_trained_model_results": false,
+    "ignores_research_eval_gaps": false,
+    "states_unverified_claim_as_fact": false,
+    "claims_baseline_superiority_without_coverage": false
+  },
+  "stats": {
+    "blockers": 1,
+    "majors": 2,
+    "minors": 0,
+    "nits": 0
+  }
+}

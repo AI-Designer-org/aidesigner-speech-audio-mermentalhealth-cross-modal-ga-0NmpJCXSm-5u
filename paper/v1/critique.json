@@ -1,0 +1,31 @@
+{
+  "verdict": "needs_revision",
+  "iteration": 1,
+  "summary": "The required paper draft is missing, so the submission cannot be reviewed end-to-end as requested. Upstream validation artifacts are present, but without PAPER.tex there is no basis to assess framing, claims, citations, structure, or LaTeX in the manuscript itself.",
+  "issues": [
+    {
+      "id": "i_01",
+      "severity": "blocker",
+      "category": "structure",
+      "location": "File system: /artifacts/j_0NmpJCXSm-5u/work/paper/v1/PAPER.tex",
+      "problem": "PAPER.tex is missing or unreadable. The critique pass requires reading the draft manuscript end-to-end, but the paper directory contains only neurips_2026.sty and no TeX source file.",
+      "suggested_fix": "Provide a readable PAPER.tex at the specified path, then rerun the critique pass so the manuscript can be checked against the upstream artifacts and research-eval files.",
+      "persisted_from_previous": false
+    }
+  ],
+  "scope_check": {
+    "overstates_empirical_results": false,
+    "claims_sota_without_numbers": false,
+    "relabels_synthetic_as_real": false,
+    "demands_trained_model_results": false,
+    "ignores_research_eval_gaps": false,
+    "states_unverified_claim_as_fact": false,
+    "claims_baseline_superiority_without_coverage": false
+  },
+  "stats": {
+    "blockers": 1,
+    "majors": 0,
+    "minors": 0,
+    "nits": 0
+  }
+}
