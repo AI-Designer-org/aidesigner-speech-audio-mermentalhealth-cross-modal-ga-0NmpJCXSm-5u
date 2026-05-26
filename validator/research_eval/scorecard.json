@@ -1,0 +1,153 @@
+{
+  "task_level": "level_1",
+  "domain": "Speech/Audio + CV + LM (Multimodal Fusion)",
+  "upstream_contract_present": true,
+  "contract_traceability": [
+    "research/mer-mental-health-research.md — research lifecycle contract with novelty claims, baseline requirements, evaluation requirements, falsification criteria",
+    "architect/mer-mental-health-architecture.md — traceability table (10 rows) mapping research items to architecture decisions with validation hooks",
+    "coder/ — full PyTorch implementation: config.py, model.py, encoders.py, fusion.py, session.py, concept.py, layers.py"
+  ],
+  "baseline_status": [
+    "TODO: unimodal baselines (text-only, audio-only, video-only) — implemented in benchmarks.py but require clinical data for meaningful comparison",
+    "TODO: late fusion baseline — implemented in benchmarks.py (LateFusionWrapper), compared to CM-GEF under dropout",
+    "TODO: early fusion baseline — not yet implemented (concatenation + MLP)",
+    "TODO: MDD-MARF re-implementation — not yet implemented (requires published code or full re-implementation)",
+    "TODO: ablated gating vs. static weighted fusion — implemented as ablation #1 (drop_cmgef) in ablation.py"
+  ],
+  "claim_status_summary": {
+    "grounded": [
+      "Cross-modal gated exchange has not been validated on clinical data with clinically-correlated dropout",
+      "Session-level therapeutic phase modeling absent from current MER",
+      "No disaggregated demographic fairness reporting exists for clinical MER"
+    ],
+    "hypothesis": [
+      "Two-stage SSL pre-train + LoRA adaptation can match or exceed full fine-tuning on clinical MER",
+      "Per-dimension gating outperforms scalar modality gates",
+      "Clinical concept bottleneck maintains accuracy vs. direct prediction",
+      "Modality dropout simulation during training improves test-time robustness"
+    ],
+    "TODO_unverified": [
+      "Whether clinically-correlated dropout patterns are fundamentally harder than random dropout — requires empirical measurement on real clinical data",
+      "Whether session-level temporal modeling benefit is from longer context or therapeutic phase priors — requires controlled ablation",
+      "Minimum labeled clinical data required for effective LoRA adaptation — requires systematic data-scarce experiments",
+      "Clinician-rated interpretability of concept→PHQ-8 mapping — requires Likert-scale study with ≥3 clinicians",
+      "Performance disaggregated by demographic group — requires sufficiently diverse clinical dataset"
+    ]
+  },
+  "scores": {
+    "novelty": {
+      "score": 3,
+      "evidence": [
+        "Research stage identified 5 specific, actionable novelty gaps in clinical MER literature (gated exchange on clinical data, session-level temporal modeling, label-efficient adaptation, fairness auditing, clinical interpretability)",
+        "Architecture design includes 4 novel blocks (CM-GEF, SLHT, CCB, Quality Estimators) each justified against prior work",
+        "Gated exchange mechanism with per-dimension substitution and reliability weighting is not present in any prior clinical MER work"
+      ],
+      "concerns": [
+        "Level 1 task — no papers were provided to validate novelty against prior art beyond what the research stage found",
+        "Individual components (cross-modal attention, concept bottlenecks, Transformers) are established; novelty lies in their combination for clinical MER",
+        "Novelty of clinically-correlated dropout simulation protocol is claimed but the protocol itself is a standard random dropout modification"
+      ]
+    },
+    "experimental_comprehensiveness": {
+      "score": 4,
+      "evidence": [
+        "Layer 1: 35+ pytest tests covering shapes, gradients, numerical stability, missing modalities, concept bottleneck range constraints",
+        "Layer 2: 7 domain-specific benchmarks (missing modality stress, clinical dropout patterns, late fusion comparison, quality estimator sensitivity, sustained affect proxy, concept mapping, throughput)",
+        "Layer 3: 10 named ablations, each tied to a single ModelConfig field change with hypothesis and expected movement",
+        "Layer 4: Profiling script supporting inference/train modes, torch.profiler integration, per-component memory breakdown",
+        "All 5 baseline requirements from the research contract are addressed (unimodal, late fusion, early fusion, MDD-MARF, ablated gating)"
+      ],
+      "concerns": [
+        "Benchmarks run on synthetic data only — no DAIC-WOZ/E-DAIC integration",
+        "Early fusion baseline mentioned in requirements but not yet implemented in the benchmark suite",
+        "MDD-MARF re-implementation is a significant effort requiring careful architecture reproduction — not yet done",
+        "Fairness evaluation requires actual demographic labels — not yet integrated",
+        "Clinician interpretability study is deferred (requires domain experts)",
+        "No integration with real clinical data loaders"
+      ]
+    },
+    "theoretical_foundation": {
+      "score": 4,
+      "evidence": [
+        "Architecture document provides one-sentence inductive bias justifications for every design decision with status labels (grounded/hypothesis)",
+        "All 4 novel blocks have clear motivation grounded in clinical ML literature",
+        "Complexity analysis provided comparing against 7 architecture families",
+        "Concept bottleneck initialization uses diagonal-dominant prior for clinical interpretability",
+        "Quality estimator + gated substitution provides dual-modality robustness redundancy"
+      ],
+      "concerns": [
+        "No formal theoretical bounds (generalization, approximation, sample complexity)",
+        "Missing modality handling is heuristic (gating), not principled (e.g., not Bayesian)",
+        "Phase labeling strategy relies on heuristics rather than empirical validation of phase detection accuracy"
+      ]
+    },
+    "result_analysis": {
+      "score": 2,
+      "evidence": [
+        "Benchmarks produce quantitative metrics (MAE, degradation %, throughput, memory) on synthetic data",
+        "Ablation runner compares baseline vs. ablated model with synthetic metrics",
+        "Profiling script provides latency, memory, and FLOP estimates"
+      ],
+      "concerns": [
+        "All results are on synthetic random data — no clinical dataset integration",
+        "No actual training has been conducted; reported metrics are from randomly initialized models",
+        "No comparison against published SOTA numbers (MDD-MARF MAE 3.13, etc.) on real data",
+        "Pass/fail criteria in benchmarks are suggestive but not validated on real distributions",
+        "No error analysis, failure case breakdown, or confidence intervals"
+      ]
+    },
+    "implementation_reproducibility": {
+      "score": 4,
+      "evidence": [
+        "Complete PyTorch implementation with ModelConfig dataclass for all hyperparameters",
+        "Smoke test verifies all forward passes, gradient flow, training stage setup, and loss computation",
+        "Modular architecture: each component (encoders, fusion, session, concept) has clear interface and can be tested independently",
+        "Seed set (42) for reproducible synthetic data generation",
+        "pytest suite runnable with single command",
+        "All files importable and runnable from the same codebase"
+      ],
+      "concerns": [
+        "Dependency on HuggingFace transformers for WavLM/DINOv2/MentalBERT — actual models are stubbed with random init in test mode",
+        "No environment.yaml or requirements.txt provided for dependency management",
+        "No data processing pipeline for DAIC-WOZ/E-DAIC (data loaders not implemented)",
+        "Two-stage training script not yet implemented (only stage configuration methods exist)"
+      ]
+    },
+    "writing_readiness": {
+      "score": 3,
+      "evidence": [
+        "Research stage provides comprehensive literature review with 5 identified gaps, complexity table, and falsification criteria",
+        "Architecture document includes full ASCII diagram, traceability table, and risk flags",
+        "All code files have thorough docstrings describing shape conventions and design rationale",
+        "Results can be generated via consistent command-line interfaces",
+        "Validation infrastructure covers 5 universal layers with domain-specific adaptations"
+      ],
+      "concerns": [
+        "No actual experiment results to report in a paper",
+        "No training script (train.py) that produces trained model checkpoints",
+        "No real data loader integration means all numbers are from untrained random models",
+        "Clinician-interpretability claims are untested",
+        "Fairness claims require demographic data that may not be available"
+      ]
+    }
+  },
+  "blocking_gaps": [
+    "No real clinical data integration (DAIC-WOZ/E-DAIC data loaders missing)",
+    "No training script (train.py) for two-stage training pipeline",
+    "Benchmarks run on synthetic data only — no actual model has been trained",
+    "MDD-MARF baseline re-implementation not available",
+    "Clinician interpretability study cannot proceed without clinical partners",
+    "Fairness evaluation cannot proceed without demographic labels",
+    "Early fusion baseline not yet implemented"
+  ],
+  "recommended_next_experiments": [
+    "1. Integrate DAIC-WOZ/E-DAIC data loaders and train the model from scratch",
+    "2. Run all 10 ablations with a trained model to measure real effect sizes",
+    "3. Implement MDD-MARF baseline and compare against CM-GEF on clinical test splits",
+    "4. Run missing modality stress test with 6 dropout conditions on clinical data",
+    "5. Compute demographic fairness metrics on E-DAIC (which has gender labels)",
+    "6. Measure sustained affect F1 by training a probe classifier on session features",
+    "7. Run label-efficiency sweep (5/10/25/50/100% of DAIC-WOZ) to validate LoRA hypothesis",
+    "8. Implement streaming-mode latency benchmark for real-time deployment viability"
+  ]
+}
